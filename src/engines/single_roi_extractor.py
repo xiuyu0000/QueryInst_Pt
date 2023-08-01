@@ -1,4 +1,5 @@
-import numpy as np
+from typing import Tuple
+
 import mindspore.nn as nn
 import mindspore.ops as ops
 from mindspore import Tensor, dtype as mstype
@@ -33,13 +34,8 @@ class SingleRoIExtractor(nn.Cell):
         self.out_size = roi_layer['out_size']
         self.sample_num = roi_layer['sample_num']
         self.roi_layers = self.build_roi_layers(self.featmap_strides)
-        self.roi_layers = nn.CellList(self.roi_layers)
 
         self.finest_scale_ = finest_scale
-        self.clamp = ops.clip_by_value
-
-        self.equal = ops.Equal()
-        self.select = ops.Select()
 
         _mode_16 = False
         self.dtype = np.float16 if _mode_16 else np.float32
@@ -93,21 +89,59 @@ class SingleRoIExtractor(nn.Cell):
         target_lvls = ops.log2(scale / self.finest_scale + self.epslion)
         target_lvls = ops.floor(target_lvls)
         target_lvls = ops.cast(target_lvls, mstype.int32)
-        target_lvls = self.clamp(target_lvls, self.zeros, self.max_levels)
+        target_lvls = ops.clip_by_value(target_lvls, self.zeros, self.max_levels)
 
         return target_lvls
 
-    def construct(self, features, rois):
-        """SingleRoIExtractor"""
+    def construct(self, features: Tuple[Tensor], rois: Tensor):
+        """Extractor ROI feats.
 
+        Args:
+            features (Tuple[Tensor]): Multi-scale features.
+            rois (Tensor): RoIs with the shape (n, 5) where the first
+                column indicates batch id of each RoI.
+
+        Returns:
+            Tensor: RoI feature.
+        """
         res = self.res_
         target_lvls = self._c_map_roi_levels(rois)
         for i in range(self.num_levels):
-            mask = self.equal(target_lvls, ops.ScalarToArray()(i))
-            mask = ops.Reshape()(mask, (-1, 1, 1, 1))
+            mask = ops.equal(target_lvls, ops.scalar_to_tensor(i, mstype.int32))
+            mask = ops.reshape(mask, (-1, 1, 1, 1))
             roi_feats_t = self.roi_layers[i](features[i], rois)
-            mask = self.cast(ops.Tile()(self.cast(mask, mstype.int32),
-                                        (1, 256, self.out_size, self.out_size)), mstype.bool_)
-            res = self.select(mask, roi_feats_t, res)
+            mask = ops.cast(ops.tile(ops.cast(mask, mstype.int32),
+                                     (1, 256, self.out_size, self.out_size)), mstype.bool_)
+            res = ops.select(mask, roi_feats_t, res)
 
         return res
+
+
+if __name__ == "__main__":
+    from src.roi_head import bbox2roi
+    from src.rpn_head import EmbeddingRPNHead
+    import numpy as np
+
+    from mindspore import context
+
+    context.set_context(mode=context.PYNATIVE_MODE, device_target="CPU")
+    data_samples = [{"metainfo": {"img_shape": [768, 1344, 3]}}]
+
+    rpn_head = EmbeddingRPNHead()
+
+    n_output = []
+    for j in range(4):
+        f = np.load("../../data/features{}.npy".format(j))
+        n_output.append(Tensor(f))
+    n_output = tuple(n_output)
+    rpn_results_list = rpn_head(n_output, data_samples)
+    proposal_list = [res["bboxes"] for res in rpn_results_list]
+    rois = bbox2roi(proposal_list)
+    bbox_roi_extractor = SingleRoIExtractor(roi_layer=dict(out_size=7, sample_num=2),
+                                            out_channels=256,
+                                            featmap_strides=[4, 8, 16, 32])
+    bbox_feats = bbox_roi_extractor(n_output, rois)
+    print(bbox_feats.shape)
+    # Output:
+    # (100, 256, 7, 7)
+    np.save("../../data/bbox_feats.npy", bbox_feats.asnumpy())

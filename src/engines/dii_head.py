@@ -52,17 +52,17 @@ class DynamicConv(nn.Cell):
         self.dynamic_layer = nn.Dense(
             self.in_channels, self.num_params_in + self.num_params_out)
 
-        self.norm_in = norm(self.feat_channels)
-        self.norm_out = norm(self.out_channels)
+        self.norm_in = norm([self.feat_channels])
+        self.norm_out = norm([self.out_channels])
 
         self.activation = act()
 
         num_output = self.out_channels * input_feat_shape ** 2
         if self.with_proj:
             self.fc_layer = nn.Dense(num_output, self.out_channels)
-            self.fc_norm = norm(self.out_channels)
+            self.fc_norm = norm([self.out_channels])
 
-    def construct(self, param_feature: Tensor, input_feature: Tensor) -> Tensor:
+    def construct(self, input_feature: Tensor, param_feature: Tensor) -> Tensor:
         """Forward function for `DynamicConv`.
 
         Args:
@@ -77,9 +77,9 @@ class DynamicConv(nn.Cell):
             Tensor: The output feature has shape
             (num_all_proposals, out_channels).
         """
-        input_feature = input_feature.flatten(start_dim=2).permute(2, 0, 1, 3)
+        input_feature = input_feature.flatten(start_dim=2).permute(2, 0, 1)
 
-        input_feature = input_feature.permute(1, 0, 2, 3)
+        input_feature = input_feature.permute(1, 0, 2)
         parameters = self.dynamic_layer(param_feature)
 
         param_in = parameters[:, :self.num_params_in].view((
@@ -121,6 +121,7 @@ class DeltaXYWHBBoxCoder:
         target_stds (Sequence[float]): Denormalizing standard deviation of
             target for delta coordinates
     """
+    encode_size = 4
 
     def __init__(self,
                  target_means: Sequence[float] = (0., 0., 0., 0.),
@@ -155,27 +156,70 @@ class DeltaXYWHBBoxCoder:
 
         return delta_targets
 
-    def decoder(self, predicts, anchors):
-        """Apply transformation `pred_bboxes` to `boxes`.
+    def decoder(self,
+                rois: Tensor,
+                deltas: Tensor,
+                max_shape: Optional[Sequence[int]] = None,
+                wh_ratio_clip: float = 16 / 1000,
+                clip_border: bool = False) -> Tensor:
+
+        """Apply deltas to shift/scale base boxes.
+
+        Typically the rois are anchor or proposed bounding boxes and the deltas are
+        network outputs used to shift/scale those boxes.
+        This is the inverse function of :func:`bbox2delta`.
 
         Args:
-            anchors (Tensor): Basic boxes. Shape
-                (B, N, 4) or (N, 4)
-            predicts (Tensor): Encoded offsets with respect to each roi.
-               Has shape (B, N, num_classes * 4) or (B, N, 4) or
-               (N, num_classes * 4) or (N, 4). Note N = num_anchors * W * H
-               when rois is a grid of anchors.Offset encoding follows [1]_.
+            rois (Tensor): Boxes to be transformed. Has shape (N, 4).
+            deltas (Tensor): Encoded offsets relative to each roi.
+                Has shape (N, num_classes * 4) or (N, 4). Note
+                N = num_base_anchors * W * H, when rois is a grid of
+                anchors. Offset encoding follows [1]_.
+            max_shape (tuple[int, int]): Maximum bounds for boxes, specifies
+               (H, W). Default None.
+            wh_ratio_clip (float): Maximum aspect ratio for boxes. Default
+                16 / 1000.
+            clip_border (bool, optional): Whether clip the objects outside the
+                border of the image. Default True.
 
         Returns:
-            Tensor: Decoded boxes.
+            Tensor: Boxes with shape (N, num_classes * 4) or (N, 4), where 4
+               represent tl_x, tl_y, br_x, br_y.
         """
-        anchors_wh = anchors[:, [2, 3]] - anchors[:, [0, 1]]
-        anchors_xy = anchors[:, [0, 1]] + 0.5 * anchors_wh
-        scale_reg = predicts * self.target_stds
-        scale_wh = scale_reg[..., 2:].exp() * anchors_wh
-        scale_x1y1 = (anchors_xy + scale_reg[..., :2] * anchors_wh) - 0.5 * scale_wh
-        scale_x2y2 = scale_x1y1 + scale_wh
-        return ops.cat([scale_x1y1, scale_x2y2], axis=-1)
+        num_bboxes, num_classes = deltas.shape[0], deltas.shape[1] // 4
+        if num_bboxes == 0:
+            return deltas
+
+        deltas = deltas.reshape(-1, 4)
+
+        means = self.target_means.astype(deltas.dtype).reshape(-1, 4)
+        stds = self.target_stds.astype(deltas.dtype).reshape(-1, 4)
+        denorm_deltas = deltas * stds + means
+
+        dxy = denorm_deltas[:, :2]
+        dwh = denorm_deltas[:, 2:]
+
+        # Compute width/height of each roi
+        rois_ = rois.repeat(1, num_classes).reshape(-1, 4)
+        pxy = ((rois_[:, :2] + rois_[:, 2:]) * 0.5)
+        pwh = (rois_[:, 2:] - rois_[:, :2])
+
+        dxy_wh = pwh * dxy
+
+        max_ratio = ops.abs(ops.log(Tensor(wh_ratio_clip)))
+
+        dwh = dwh.clamp(min=-max_ratio, max=max_ratio)
+
+        gxy = pxy + dxy_wh
+        gwh = pwh * dwh.exp()
+        x1y1 = gxy - (gwh * 0.5)
+        x2y2 = gxy + (gwh * 0.5)
+        bboxes = ops.cat([x1y1, x2y2], axis=-1)
+        if clip_border and max_shape is not None:
+            bboxes[..., 0::2].clamp_(min=0, max=max_shape[1])
+            bboxes[..., 1::2].clamp_(min=0, max=max_shape[0])
+        bboxes = bboxes.reshape(num_bboxes, -1)
+        return bboxes
 
 
 class DIIHead(nn.Cell):
@@ -220,7 +264,8 @@ class DIIHead(nn.Cell):
                  reg_tower_num: int = 3,
                  **kwargs):
         super(DIIHead, self).__init__()
-        self.self_attn = nn.MultiheadAttention(in_channel, nhead, dropout=dropout)
+        self.num_classes = num_cls
+        self.self_attn = nn.MultiheadAttention(in_channel, nhead)
         self.out_channel = out_channel if out_channel else in_channel
 
         self.inst_interact = DynamicConv(in_channel,
@@ -233,34 +278,35 @@ class DIIHead(nn.Cell):
         self.feed_forward = nn.SequentialCell([
             nn.Dense(in_channel, dim_feedforward),
             activation(),
-            nn.Dropout(dropout),
+            nn.Dropout(p=dropout),
             nn.Dense(dim_feedforward, in_channel)
         ])
 
-        self.norm1 = nn.LayerNorm(in_channel)
-        self.norm2 = nn.LayerNorm(in_channel)
-        self.norm3 = nn.LayerNorm(in_channel)
-        self.dropout1 = nn.Dropout(dropout)
-        self.dropout2 = nn.Dropout(dropout)
-        self.dropout3 = nn.Dropout(dropout)
+        self.norm1 = nn.LayerNorm([in_channel])
+        self.norm2 = nn.LayerNorm([in_channel])
+        self.norm3 = nn.LayerNorm([in_channel])
+        self.dropout1 = nn.Dropout(p=dropout)
+        self.dropout2 = nn.Dropout(p=dropout)
+        self.dropout3 = nn.Dropout(p=dropout)
 
         self.cls_tower = list()
         for _ in range(cls_tower_num):
             self.cls_tower.append(nn.Dense(in_channel, in_channel, has_bias=False))
-            self.cls_tower.append(nn.LayerNorm(in_channel))
+            self.cls_tower.append(nn.LayerNorm([in_channel]))
             self.cls_tower.append(activation())
         self.cls_tower = nn.SequentialCell(self.cls_tower)
 
         self.reg_tower = list()
         for _ in range(reg_tower_num):
             self.reg_tower.append(nn.Dense(in_channel, in_channel, has_bias=False))
-            self.reg_tower.append(nn.LayerNorm(in_channel))
+            self.reg_tower.append(nn.LayerNorm([in_channel]))
             self.reg_tower.append(activation())
         self.reg_tower = nn.SequentialCell(self.reg_tower)
+        self.reg_class_agnostic = True
 
         self.class_logits = nn.Dense(in_channel, num_cls)
         self.bboxes_delta = nn.Dense(in_channel, 4)
-        self.box_coder = DeltaXYWHBBoxCoder()
+        self.bbox_coder = DeltaXYWHBBoxCoder()
         self.init_weights()
 
     def construct(self, x: Tensor, params_x: Tensor):
@@ -289,16 +335,14 @@ class DIIHead(nn.Cell):
               (batch_size, num_proposal, feature_dimensions).
             - params_attn (Tensor): Intermediate feature.
         """
-        nxp, c, _, _ = x.shape
         n, p, _ = params_x.shape
         # [res**2,N * nr_boxes,in_channel]
-        x = x.view(nxp, c, -1).permute((2, 0, 1))
         # [nr_boxes, N, in_channel]
         params_x = params_x.permute((1, 0, 2))
-        params_attn = self.self_attn(params_x, params_x, value=params_x)[0]
+        params_attn = self.self_attn(params_x, params_x, params_x)[0]
         params_attn = self.norm1(params_x + self.dropout1(params_attn))
 
-        params_x = params_attn.permute((1, 0, 2)).view((-1, params_x.size(2)))
+        params_x = params_attn.permute((1, 0, 2)).view((-1, params_x.shape[2]))
         # [N*nr_boxes,in_channel]
         param_intersect = self.inst_interact(x, params_x)
         params_x = self.norm2(params_x + self.dropout2(param_intersect))
@@ -310,8 +354,8 @@ class DIIHead(nn.Cell):
         reg_tower = self.reg_tower(out)
         cls_out = self.class_logits(cls_tower)
         reg_delta = self.bboxes_delta(reg_tower)
-        return cls_out.view(n, p, -1), reg_delta.view(
-            n, p, -1), out.view(n, p, -1), params_attn
+        return cls_out.view((n, p, -1)), reg_delta.view((
+            n, p, -1)), out.view((n, p, -1)), params_attn
 
     def init_weights(self) -> None:
         """Initialize weights for cells."""
@@ -352,7 +396,7 @@ class DIIHead(nn.Cell):
         Returns:
             list[dict]: Refined bboxes of each image.
         """
-        pos_is_gts = [res.pos_is_gt for res in sampling_results]
+        pos_is_gts = [res["pos_is_gt"] for res in sampling_results]
         # bbox_targets is a tuple
         labels = bbox_results['bbox_targets'][0]
         cls_scores = bbox_results['cls_score']
@@ -371,7 +415,7 @@ class DIIHead(nn.Cell):
         labels = ops.where(Tensor(labels_condition), cls_scores.argmax(1),
                            labels)
 
-        img_ids, _ = ops.unique(rois[:, 0]).long()
+        img_ids = ops.unique(rois[:, 0])[0].long()
         assert img_ids.numel() <= len(batch_img_metas)
 
         results_list = []
@@ -422,6 +466,71 @@ class DIIHead(nn.Cell):
         assert bbox_pred.shape[1] == reg_dim
 
         max_shape = img_meta['img_shape']
-        regressed_bboxes = self.bbox_coder.decode(
+        print(f"bbox_pred: {bbox_pred[0]}, priors: {priors[0]}")
+        regressed_bboxes = self.bbox_coder.decoder(
             priors, bbox_pred, max_shape=max_shape)
         return regressed_bboxes
+
+
+if __name__ == "__main__":
+    import numpy as np
+    from src.roi_head import bbox2roi
+    from src.rpn_head import EmbeddingRPNHead
+
+    from mindspore import context
+
+    context.set_context(mode=context.PYNATIVE_MODE, device_target="CPU")
+    data_samples = [{"metainfo": {"img_shape": [768, 1344, 3]}}]
+    batch_img_metas = [{"img_shape": [768, 1344]}]
+    num_imgs = len(batch_img_metas)
+
+    rpn_head = EmbeddingRPNHead()
+
+    n_output = []
+    for j in range(4):
+        f = np.load("../../data/features{}.npy".format(j))
+        n_output.append(Tensor(f))
+    n_output = tuple(n_output)
+    rpn_results_list = rpn_head(n_output, data_samples)
+    proposal_list = [res["bboxes"] for res in rpn_results_list]
+    rois = bbox2roi(proposal_list)
+    bbox_feats = Tensor(np.load("../../data/bbox_feats.npy"))
+    print(f"bbox_feats.shape: {bbox_feats.shape}")
+    object_feats = ops.cat(
+        [res.pop('features')[None, ...] for res in rpn_results_list])
+    print(f"object_feats.shape: {object_feats.shape}")
+    bbox_head = DIIHead(in_channel=256, inner_channel=64, out_channel=256)
+    cls_score, bbox_pred, object_feats, attn_feats = bbox_head(
+        bbox_feats, object_feats)
+    print(f"cls_score: {cls_score.shape}, bbox_pred: {bbox_pred.shape}, "
+          f"object_feats: {object_feats.shape}, attn_feats: {attn_feats.shape}")
+
+    fake_bbox_results = dict(
+        rois=rois,
+        bbox_targets=(rois.new_zeros(len(rois), dtype=mstype.int64)),
+        bbox_pred=bbox_pred.view((-1, bbox_pred.shape[-1])),
+        cls_score=cls_score.view((-1, cls_score.shape[-1])))
+    fake_sampling_results = [
+        dict(pos_is_gt=rois.new_zeros(object_feats.shape[1]))
+        for _ in range(len(batch_img_metas))
+    ]
+    results_list = bbox_head.refine_bboxes(
+        sampling_results=fake_sampling_results,
+        bbox_results=fake_bbox_results,
+        batch_img_metas=batch_img_metas)
+    proposal_list = [res["bboxes"] for res in results_list]
+    print([p.shape for p in proposal_list])
+    bbox_results = dict(
+        cls_score=cls_score,
+        decoded_bboxes=ops.cat(proposal_list),
+        object_feats=object_feats,
+        attn_feats=attn_feats,
+        # detach then use it in label assign
+        detached_cls_scores=[
+            cls_score[i] for i in range(num_imgs)
+        ],
+        detached_proposals=[item for item in proposal_list])
+    bbox_res = [bbox_results[k].asnumpy() for k in bbox_results if
+                k not in ["detached_cls_scores", "detached_proposals"]]
+    # ("cls_score", "decoded_bboxes", "object_feats", "attn_feats")
+    np.save("../../data/bbox_results.npy", bbox_res)

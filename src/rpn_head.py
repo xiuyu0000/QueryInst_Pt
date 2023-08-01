@@ -118,22 +118,30 @@ class EmbeddingRPNHead(nn.Cell):
 
 if __name__ == "__main__":
     import numpy as np
-    from mindspore import dtype as mstype
-    from src.resnet import ResNet, ResidualBlock
-    from src.fpn import FPN
+    # from mindspore import dtype as mstype
+    # from src.resnet import ResNet, ResidualBlock
+    # from src.fpn import FPN
     from mindspore import context
-
+    #
     context.set_context(mode=context.PYNATIVE_MODE, device_target="CPU")
-    inputs = Tensor(np.ones([1, 3, 768, 1344]), mstype.float32)
+    # inputs = Tensor(np.ones([1, 3, 768, 1344]), mstype.float32)
     data_samples = [{"metainfo": {"img_shape": [768, 1344, 3]}}]
-
-    net = ResNet(ResidualBlock, [3, 4, 6, 3], [64, 256, 512, 1024], [256, 512, 1024, 2048], False)
-    neck = FPN([256, 512, 1024, 2048], 256, num_outs=4)
+    #
+    # net = ResNet(ResidualBlock, [3, 4, 6, 3], [64, 256, 512, 1024], [256, 512, 1024, 2048], False)
+    # neck = FPN([256, 512, 1024, 2048], 256, num_outs=4)
     rpn_head = EmbeddingRPNHead()
-
-    bb_output = net(inputs)
-    n_output = neck(bb_output)
+    #
+    # bb_output = net(inputs)
+    # n_output = neck(bb_output)
+    n_output = []
+    for i in range(4):
+        f = np.load("../data/features{}.npy".format(i))
+        n_output.append(Tensor(f))
+    n_output = tuple(n_output)
     rpn_results_list = rpn_head(n_output, data_samples)
     print([rpn_results_list[0][e].shape for e in rpn_results_list[0]])
+    print([e for e in rpn_results_list[0]])
     # Output:
     # [(100, 4), (1, 400), (100, 256)]
+    # ['bboxes', 'imgs_whwh', 'features']
+    np.save("../data/rpn_results_list.npy", rpn_results_list, allow_pickle=True)

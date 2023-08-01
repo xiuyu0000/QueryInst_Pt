@@ -224,8 +224,8 @@ class ResidualBlock(nn.Cell):
 
 
 if __name__ == "__main__":
+    inputs = Tensor(np.load("../data/inputs.npy")).unsqueeze(0)
     net = ResNet(ResidualBlock, [3, 4, 6, 3], [64, 256, 512, 1024], [256, 512, 1024, 2048], False)
-    inputs = Tensor(np.ones([1, 3, 768, 1344]), mstype.float32)
     output = net(inputs)
     print(output[0].shape, output[1].shape, output[2].shape, output[3].shape)
     #Output:

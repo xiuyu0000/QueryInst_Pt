@@ -26,25 +26,16 @@ def unpack_gt_instances(batch_data_samples: List[dict]) -> tuple:
             - batch_gt_instances (list[dict]): Batch of
                 gt_instance. It usually includes ``bboxes`` and ``labels``
                 attributes.
-            - batch_gt_instances_ignore (list[dict]):
-                Batch of gt_instances_ignore. It includes ``bboxes`` attribute
-                data that is ignored during training and testing.
-                Defaults to None.
             - batch_img_metas (list[dict]): Meta information of each image,
                 e.g., image size, scaling factor, etc.
     """
     batch_gt_instances = []
-    batch_gt_instances_ignore = []
     batch_img_metas = []
     for data_sample in batch_data_samples:
         batch_img_metas.append(data_sample["metainfo"])
         batch_gt_instances.append(data_sample["gt_instances"])
-        if 'ignored_instances' in data_sample:
-            batch_gt_instances_ignore.append(data_sample["ignored_instances"])
-        else:
-            batch_gt_instances_ignore.append(None)
 
-    return batch_gt_instances, batch_gt_instances_ignore, batch_img_metas
+    return batch_gt_instances, batch_img_metas
 
 
 def bbox2roi(bbox_list: List[Tensor]) -> Tensor:
@@ -72,7 +63,7 @@ def bbox2roi(bbox_list: List[Tensor]) -> Tensor:
 class SparseRoIHead(nn.Cell):
     r"""The RoIHead for `Sparse R-CNN: End-to-End Object Detection with
     Learnable Proposals <https://arxiv.org/abs/2011.12450>`_
-    and `Instances as Queries <http://arxiv.org/abs/2105.01928>`_
+    and `Instances as Queries <https://arxiv.org/abs/2105.01928>`_
 
     Args:
         num_stages (int): Number of stage whole iterative process.
@@ -230,7 +221,7 @@ class SparseRoIHead(nn.Cell):
             sampling_results=fake_sampling_results,
             bbox_results=fake_bbox_results,
             batch_img_metas=batch_img_metas)
-        proposal_list = [res.bboxes for res in results_list]
+        proposal_list = [res["bboxes"] for res in results_list]
         bbox_results = dict(
             cls_score=cls_score,
             decoded_bboxes=ops.cat(proposal_list),
@@ -269,7 +260,7 @@ class SparseRoIHead(nn.Cell):
         Returns:
             dict[str, Tensor]
         """
-        proposal_list = [res.bboxes for res in results_list]
+        proposal_list = [res["bboxes"] for res in results_list]
         rois = bbox2roi(proposal_list)
         bbox_results = self._bbox_forward(stage, x, rois, object_feats,
                                           batch_img_metas)
@@ -352,9 +343,7 @@ class SparseRoIHead(nn.Cell):
             tuple: A tuple of features from ``bbox_head`` and ``mask_head``
             forward.
         """
-        outputs = unpack_gt_instances(batch_data_samples)
-        (batch_gt_instances, batch_gt_instances_ignore,
-         batch_img_metas) = outputs
+        batch_gt_instances, batch_img_metas = unpack_gt_instances(batch_data_samples)
 
         all_stage_bbox_results = []
         object_feats = ops.cat(
