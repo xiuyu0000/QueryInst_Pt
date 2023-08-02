@@ -405,14 +405,6 @@ if __name__ == "__main__":
     batch_img_metas = {"img_shape": [768, 1344]}
     batch_data_samples = [{"gt_instances": batch_gt_instances, "metainfo": batch_img_metas}]
 
-    # bbox_ress = np.load("../data/bbox_results.npy", allow_pickle=True)
-    # bbox_key = ("cls_score", "decoded_bboxes", "object_feats", "attn_feats")
-    # bbox_results = {k: Tensor(v) for k, v in zip(bbox_key, bbox_ress)}
-
-    # cls_pred_list = [bbox_results["cls_score"][0]]
-    # proposal_list = [
-    #     bbox_results["decoded_bboxes"]
-    # ]
     match_costs_config = [
         dict(type='FocalLossCost', weight=2.0),
         dict(type='BBoxL1Cost', weight=5.0),
@@ -433,63 +425,4 @@ if __name__ == "__main__":
                              mask_head=mask_head_config)
     res = roi_head(n_output, results_list, batch_data_samples)
     print(f'Final result: {res[-1][1]["mask_preds"].shape}')
-    # sampling_results = []
-    # for i in range(len(batch_img_metas)):
-    #     pred_instances = defaultdict()
-    #     pred_instances["bboxes"] = proposal_list[i]  # for assinger
-    #     pred_instances["scores"] = cls_pred_list[i]
-    #     pred_instances["priors"] = proposal_list[i]  # for sampler
-    #
-    #     assign_result = hungarian_assigner(
-    #         match_costs_config=match_costs_config,
-    #         pred_instances=pred_instances,
-    #         gt_instances=batch_gt_instances[i],
-    #         img_meta=batch_img_metas[i])
-    #
-    #     sampling_result = pseudo_sampler(
-    #         assign_result, pred_instances, batch_gt_instances[i])
-    #     sampling_results.append(sampling_result)
-    #
-    # bbox_results.update(sampling_results=sampling_results)
-    #
-    # # propose for the new proposal_list
-    # proposal_list = []
-    # for idx in range(len(batch_img_metas)):
-    #     results = defaultdict()
-    #     results["imgs_whwh"] = results_list[idx]["imgs_whwh"]
-    #     results["bboxes"] = [bbox_results["decoded_bboxes"]][idx]
-    #     proposal_list.append(results)
-    # bbox_results.update(results_list=proposal_list)
-    # bbox_results.pop('results_list')
-    # bbox_res = bbox_results.copy()
-    # bbox_res.pop('sampling_results')
-    # # all_stage_bbox_results = []
-    # # all_stage_bbox_results.append((bbox_res,))
-    #
-    # attn_feats = bbox_results['attn_feats']
-    # sampling_results = bbox_results['sampling_results']
-    #
-    # pos_rois = bbox2roi(
-    #     [res["pos_priors"] for res in sampling_results])
-    #
-    # attn_feats = ops.cat([
-    #     feats[res["pos_inds"]]
-    #     for (feats, res) in zip(attn_feats, sampling_results)
-    # ])
-    # print(f"attn_feats.shape: {attn_feats.shape}, pos_rois.shape: {pos_rois.shape}")
-    # # mask_results = self._mask_forward(stage, x, pos_rois,
-    # #                                   attn_feats)
-    # # all_stage_bbox_results[-1] += (mask_results,)
 
-    # mask_roi_extractor = SingleRoIExtractor(roi_layer=dict(out_size=14, sample_num=2),
-    #                                         out_channels=256,
-    #                                         featmap_strides=[4, 8, 16, 32])
-    # mask_head = DynamicMaskHead()
-    #
-    # mask_feats = mask_roi_extractor(n_output[:mask_roi_extractor.num_inputs],
-    #                                 pos_rois)
-    # # do not support caffe_c4 model anymore
-    # mask_preds = mask_head(mask_feats, attn_feats)
-    # print(f"mask_preds.shape: {mask_preds.shape}")
-    #
-    # mask_results = dict(mask_preds=mask_preds)
