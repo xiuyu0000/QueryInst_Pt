@@ -38,17 +38,16 @@ def hungarian_assigner(
         match_costs_config = [match_costs_config]
     elif isinstance(match_costs_config, list):
         assert len(match_costs_config) > 0, 'match_costs must not be a empty list.'
-
+    print(f"match_costs_config: {match_costs_config}")
     match_costs = [
-        create_match_cost(match_cost_config)
-        for match_cost_config in match_costs_config
+        create_match_cost(m)
+        for m in match_costs_config
     ]
 
-    assert isinstance(gt_instances.labels, Tensor)
-    assert isinstance(pred_instances.labels, Tensor)
+    assert isinstance(gt_instances["labels"], Tensor)
 
-    num_gts, num_preds = len(gt_instances), len(pred_instances)
     gt_labels = gt_instances["labels"]
+    num_gts, num_preds = gt_labels.shape[0], pred_instances["bboxes"].shape[0]
 
     # 1. assign -1 by default
     assigned_gt_inds = ops.full((num_preds,),
@@ -77,6 +76,9 @@ def hungarian_assigner(
             gt_instances=gt_instances,
             img_meta=img_meta)
         cost_list.append(cost)
+    print(f"FocalLoss cost_list: {cost_list[0].shape}, "
+          f"BBBoxLoss cost_list: {cost_list[1].shape}, "
+          f"IoULoss cost_list: {cost_list[2].shape}")
     cost = ops.stack(cost_list).sum(axis=0)
 
     # 3. do Hungarian matching on CPU using linear_sum_assignment
@@ -92,8 +94,11 @@ def hungarian_assigner(
     # assign all indices to backgrounds first
     assigned_gt_inds[:] = 0
     # assign foregrounds based on matching results
+    print(f"matched_col_inds: {matched_col_inds}, assigned_gt_inds.shape: {assigned_gt_inds.shape}")
     assigned_gt_inds[matched_row_inds] = matched_col_inds + 1
+    print(f"assigned_gt_inds: {assigned_gt_inds.shape}")
     assigned_labels[matched_row_inds] = gt_labels[matched_col_inds]
+    print(f"assigned_gt_inds: {assigned_labels.shape}")
     return dict(
         num_gts=num_gts,
         gt_inds=assigned_gt_inds,
@@ -124,10 +129,9 @@ def pseudo_sampler(assign_result: dict,
     priors = pred_instances["priors"]
 
     pos_inds = ops.unique(ops.nonzero(
-        assign_result["gt_inds"] > 0).squeeze(-1))
+        assign_result["gt_inds"] > 0).squeeze(-1))[0]
     neg_inds = ops.unique(ops.nonzero(
-        assign_result["gt_inds"] == 0).squeeze(-1))
-
+        assign_result["gt_inds"] == 0).squeeze(-1))[0]
     gt_flags = priors.new_zeros(priors.shape[0], dtype=ms.uint8)
     sampling_result = dict(
         pos_inds=pos_inds,

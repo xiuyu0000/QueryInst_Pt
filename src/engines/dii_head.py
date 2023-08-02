@@ -77,6 +77,8 @@ class DynamicConv(nn.Cell):
             Tensor: The output feature has shape
             (num_all_proposals, out_channels).
         """
+        print("input_feature.shape: ", input_feature.shape)
+        print("param_feature.shape: ", param_feature.shape)
         input_feature = input_feature.flatten(start_dim=2).permute(2, 0, 1)
 
         input_feature = input_feature.permute(1, 0, 2)

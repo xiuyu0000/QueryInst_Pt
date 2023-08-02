@@ -1,5 +1,6 @@
 from typing import Tuple
 
+import numpy as np
 import mindspore.nn as nn
 import mindspore.ops as ops
 from mindspore import Tensor, dtype as mstype
@@ -120,7 +121,6 @@ class SingleRoIExtractor(nn.Cell):
 if __name__ == "__main__":
     from src.roi_head import bbox2roi
     from src.rpn_head import EmbeddingRPNHead
-    import numpy as np
 
     from mindspore import context
 

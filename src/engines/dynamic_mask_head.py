@@ -123,9 +123,7 @@ class DynamicMaskHead(nn.Cell):
             (batch_size*num_proposals, num_classes, pooling_h*2, pooling_w*2).
         """
         proposal_feat = proposal_feat.reshape(-1, self.in_channels)
-        proposal_feat_iic = self.instance_interactive_conv(
-            proposal_feat, roi_feat)
-
+        proposal_feat_iic = self.instance_interactive_conv(roi_feat, proposal_feat)
         x = proposal_feat_iic.permute((0, 2, 1)).reshape(roi_feat.shape)
 
         for conv in self.convs:

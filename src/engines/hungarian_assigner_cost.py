@@ -13,7 +13,7 @@ def fp16_clamp(x, min=None, max=None):
     return x.clamp(min, max)
 
 
-def bbox_overlaps(bboxes1, bboxes2, mode='iou', is_aligned=False, eps=1e-6):
+def bbox_overlaps(bboxes1, bboxes2, mode='iou', eps=1e-6):
     """Calculate overlap between two set of bboxes.
 
     FP16 Contributed by https://github.com/open-mmlab/mmdetection/pull/4889
@@ -98,8 +98,6 @@ def bbox_overlaps(bboxes1, bboxes2, mode='iou', is_aligned=False, eps=1e-6):
         mode (str): "iou" (intersection over union), "iof" (intersection over
             foreground) or "giou" (generalized intersection over union).
             Default "iou".
-        is_aligned (bool, optional): If True, then m and n must be equal.
-            Default False.
         eps (float, optional): A value added to the denominator for numerical
             stability. Default 1e-6.
 
@@ -114,67 +112,48 @@ def bbox_overlaps(bboxes1, bboxes2, mode='iou', is_aligned=False, eps=1e-6):
 
     # Batch dim must be the same
     # Batch dim: (B1, B2, ... Bn)
+    print(f"bboxes1: {bboxes1.shape}, bboxes2: {bboxes2.shape}")
     assert bboxes1.shape[:-2] == bboxes2.shape[:-2]
     batch_shape = bboxes1.shape[:-2]
 
     rows = bboxes1.shape[-2]
     cols = bboxes2.shape[-2]
-    if is_aligned:
-        assert rows == cols
 
     if rows * cols == 0:
-        if is_aligned:
-            return bboxes1.new_zeros(batch_shape + (rows,))
-        else:
-            return bboxes1.new_zeros(batch_shape + (rows,))
+        return bboxes1.new_zeros(batch_shape + (rows,))
 
     area1 = (bboxes1[..., 2] - bboxes1[..., 0]) * (
             bboxes1[..., 3] - bboxes1[..., 1])
     area2 = (bboxes2[..., 2] - bboxes2[..., 0]) * (
             bboxes2[..., 3] - bboxes2[..., 1])
 
-    if is_aligned:
-        lt = ops.max(bboxes1[..., :2], bboxes2[..., :2])  # [B, rows, 2]
-        rb = ops.min(bboxes1[..., 2:], bboxes2[..., 2:])  # [B, rows, 2]
+    lt = ops.maximum(bboxes1[..., :, None, :2],
+                 bboxes2[..., None, :, :2])  # [B, rows, cols, 2]
+    rb = ops.minimum(bboxes1[..., :, None, 2:],
+                 bboxes2[..., None, :, 2:])  # [B, rows, cols, 2]
 
-        wh = fp16_clamp(rb - lt, min=0)
-        overlap = wh[..., 0] * wh[..., 1]
+    wh = fp16_clamp(rb - lt, min=0)
+    overlap = wh[..., 0] * wh[..., 1]
 
-        if mode in ['iou', 'giou']:
-            union = area1 + area2 - overlap
-        else:
-            union = area1
-        if mode == 'giou':
-            enclosed_lt = ops.min(bboxes1[..., :2], bboxes2[..., :2])
-            enclosed_rb = ops.max(bboxes1[..., 2:], bboxes2[..., 2:])
+    if mode in ['iou', 'giou']:
+        union = area1[..., None] + area2[..., None, :] - overlap
     else:
-        lt = ops.max(bboxes1[..., :, None, :2],
-                     bboxes2[..., None, :, :2])  # [B, rows, cols, 2]
-        rb = ops.min(bboxes1[..., :, None, 2:],
-                     bboxes2[..., None, :, 2:])  # [B, rows, cols, 2]
+        union = area1[..., None]
+    if mode == 'giou':
+        enclosed_lt = ops.minimum(bboxes1[..., :, None, :2],
+                              bboxes2[..., None, :, :2])
+        enclosed_rb = ops.maximum(bboxes1[..., :, None, 2:],
+                              bboxes2[..., None, :, 2:])
 
-        wh = fp16_clamp(rb - lt, min=0)
-        overlap = wh[..., 0] * wh[..., 1]
-
-        if mode in ['iou', 'giou']:
-            union = area1[..., None] + area2[..., None, :] - overlap
-        else:
-            union = area1[..., None]
-        if mode == 'giou':
-            enclosed_lt = ops.min(bboxes1[..., :, None, :2],
-                                  bboxes2[..., None, :, :2])
-            enclosed_rb = ops.max(bboxes1[..., :, None, 2:],
-                                  bboxes2[..., None, :, 2:])
-
-    eps = union.new_tensor([eps])
-    union = ops.max(union, eps)
+    eps = Tensor([eps], dtype=union.dtype)
+    union = ops.maximum(union, eps)
     ious = overlap / union
     if mode in ['iou', 'iof']:
         return ious
     # calculate gious
     enclose_wh = fp16_clamp(enclosed_rb - enclosed_lt, min=0)
     enclose_area = enclose_wh[..., 0] * enclose_wh[..., 1]
-    enclose_area = ops.max(enclose_area, eps)
+    enclose_area = ops.maximum(enclose_area, eps)
     gious = ious - (enclose_area - union) / enclose_area
     return gious
 
@@ -281,7 +260,7 @@ class BBoxL1Cost(BaseMatchCost):
         gt_bboxes = gt_bboxes / factor
         pred_bboxes = pred_bboxes / factor
 
-        bbox_cost = ops.cdist(pred_bboxes, gt_bboxes, p=1)
+        bbox_cost = ops.cdist(pred_bboxes, gt_bboxes, p=1.)
         return bbox_cost * self.weight
 
 
@@ -318,11 +297,11 @@ class IoUCost(BaseMatchCost):
         Returns:
             Tensor: Match Cost matrix of shape (num_preds, num_gts).
         """
-        pred_bboxes = pred_instances.bboxes
-        gt_bboxes = gt_instances.bboxes
+        pred_bboxes = pred_instances["bboxes"]
+        gt_bboxes = gt_instances["bboxes"]
 
         overlaps = bbox_overlaps(
-            pred_bboxes, gt_bboxes, mode=self.iou_mode, is_aligned=False)
+            pred_bboxes, gt_bboxes, mode=self.iou_mode)
         # The 1 is a constant that doesn't change the matching, so omitted.
         iou_cost = -overlaps
         return iou_cost * self.weight
@@ -345,13 +324,11 @@ class FocalLossCost(BaseMatchCost):
                  alpha: Union[float, int] = 0.25,
                  gamma: Union[float, int] = 2,
                  eps: float = 1e-12,
-                 binary_input: bool = False,
                  weight: Union[float, int] = 1.) -> None:
         super().__init__(weight=weight)
         self.alpha = alpha
         self.gamma = gamma
         self.eps = eps
-        self.binary_input = binary_input
 
     def _focal_loss_cost(self, cls_pred: Tensor, gt_labels: Tensor) -> Tensor:
         """
@@ -372,31 +349,6 @@ class FocalLossCost(BaseMatchCost):
         cls_cost = pos_cost[:, gt_labels] - neg_cost[:, gt_labels]
         return cls_cost * self.weight
 
-    def _mask_focal_loss_cost(self, cls_pred, gt_labels) -> Tensor:
-        """
-        Args:
-            cls_pred (Tensor): Predicted classification logits.
-                in shape (num_queries, d1, ..., dn), dtype=float32.
-            gt_labels (Tensor): Ground truth in shape (num_gt, d1, ..., dn),
-                dtype=int64. Labels should be binary.
-
-        Returns:
-            Tensor: Focal cost matrix with weight in shape\
-                (num_queries, num_gt).
-        """
-        cls_pred = cls_pred.flatten(1)
-        gt_labels = gt_labels.flatten(1).float()
-        n = cls_pred.shape[1]
-        cls_pred = cls_pred.sigmoid()
-        neg_cost = -(1 - cls_pred + self.eps).log() * (
-                1 - self.alpha) * cls_pred.pow(self.gamma)
-        pos_cost = -(cls_pred + self.eps).log() * self.alpha * (
-                1 - cls_pred).pow(self.gamma)
-
-        cls_cost = ops.einsum('nc,mc->nm', pos_cost, gt_labels) + \
-            ops.einsum('nc,mc->nm', neg_cost, (1 - gt_labels))
-        return cls_cost / n * self.weight
-
     def __call__(self,
                  pred_instances: dict,
                  gt_instances: dict,
@@ -414,14 +366,9 @@ class FocalLossCost(BaseMatchCost):
         Returns:
             Tensor: Match Cost matrix of shape (num_preds, num_gts).
         """
-        if self.binary_input:
-            pred_masks = pred_instances.masks
-            gt_masks = gt_instances.masks
-            return self._mask_focal_loss_cost(pred_masks, gt_masks)
-        else:
-            pred_scores = pred_instances.scores
-            gt_labels = gt_instances.labels
-            return self._focal_loss_cost(pred_scores, gt_labels)
+        pred_scores = pred_instances["scores"]
+        gt_labels = gt_instances["labels"]
+        return self._focal_loss_cost(pred_scores, gt_labels)
 
 
 MATCH_COSTS = dict(
@@ -442,6 +389,7 @@ def create_match_cost(match_cost_config: dict) -> BaseMatchCost:
     """
     if match_cost_config is None:
         return None
+    print(f'Creating match cost {match_cost_config}')
     match_cost_type = match_cost_config.pop('type')
     match_cost = MATCH_COSTS[match_cost_type](**match_cost_config)
     assert isinstance(match_cost, BaseMatchCost)

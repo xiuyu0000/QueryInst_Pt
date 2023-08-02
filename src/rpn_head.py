@@ -144,4 +144,12 @@ if __name__ == "__main__":
     # Output:
     # [(100, 4), (1, 400), (100, 256)]
     # ['bboxes', 'imgs_whwh', 'features']
-    np.save("../data/rpn_results_list.npy", rpn_results_list, allow_pickle=True)
+    results_list = []
+    results_keys = ["bboxes", "imgs_whwh", "features"]
+    for idx in range(len(rpn_results_list)):
+        results = defaultdict()
+        for key in results_keys:
+            results[key] = rpn_results_list[idx][key].asnumpy()
+        results_list.append(results)
+
+    np.save("../data/rpn_results_list.npy", results_list)
